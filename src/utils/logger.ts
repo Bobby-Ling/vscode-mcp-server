@@ -72,12 +72,23 @@ export class Logger {
     }
 
     /**
-     * Dispose of the output channel
+     * Dispose of the output channel and reset singleton instance
+     * This allows the logger to be re-created after deactivation
      */
     public dispose(): void {
         if (this.outputChannel) {
             this.outputChannel.dispose();
+            this.outputChannel = undefined as any;
         }
+        // Reset singleton so next getInstance() creates a fresh instance
+        Logger.instance = undefined as any;
+    }
+
+    /**
+     * Check if the logger is currently initialized and usable
+     */
+    public static isInitialized(): boolean {
+        return Logger.instance !== undefined && Logger.instance !== null;
     }
 }
 

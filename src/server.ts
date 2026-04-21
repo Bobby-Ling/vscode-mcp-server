@@ -231,30 +231,72 @@ export class MCPServer {
             logger.info('[MCPServer.start] Starting MCP server');
             const startTime = Date.now();
 
-            // Connect transport before starting server
-            logger.info('[MCPServer.start] Connecting transport');
-            const transportConnectStart = Date.now();
-            await this.server.connect(this.transport);
-            const transportConnectTime = Date.now() - transportConnectStart;
-            logger.info(`[MCPServer.start] Transport connected (took ${transportConnectTime}ms)`);
+            // Overall startup timeout wrapper
+            const startupPromise = async () => {
+                // Connect transport before starting server
+                logger.info('[MCPServer.start] Connecting transport');
+                const transportConnectStart = Date.now();
+                await this.server.connect(this.transport);
+                const transportConnectTime = Date.now() - transportConnectStart;
+                logger.info(`[MCPServer.start] Transport connected (took ${transportConnectTime}ms)`);
 
-            // Start HTTP server
-            logger.info('[MCPServer.start] Starting HTTP server');
-            const httpServerStartTime = Date.now();
+                // Start HTTP server
+                logger.info('[MCPServer.start] Starting HTTP server');
+                const httpServerStartTime = Date.now();
 
-            return new Promise((resolve) => {
-                // Bind to localhost only for security
-                this.httpServer = this.app.listen(this.port, this.host, () => {
-                    const httpStartTime = Date.now() - httpServerStartTime;
-                    logger.info(`[MCPServer.start] HTTP Server started (took ${httpStartTime}ms)`);
-                    logger.info(`MCP Server listening on ${this.host}:${this.port}`);
+                return new Promise<void>((resolve, reject) => {
+                    // Bind to localhost only for security
+                    this.httpServer = this.app.listen(this.port, this.host, () => {
+                        const httpStartTime = Date.now() - httpServerStartTime;
+                        logger.info(`[MCPServer.start] HTTP Server started (took ${httpStartTime}ms)`);
+                        logger.info(`MCP Server listening on ${this.host}:${this.port}`);
 
-                    const totalTime = Date.now() - startTime;
-                    logger.info(`[MCPServer.start] Server startup complete (total: ${totalTime}ms)`);
+                        const totalTime = Date.now() - startTime;
+                        logger.info(`[MCPServer.start] Server startup complete (total: ${totalTime}ms)`);
 
-                    resolve();
+                        resolve();
+                    });
+
+                    // Handle server errors (e.g., port already in use)
+                    this.httpServer.on('error', (error: Error & { code?: string }) => {
+                        const httpStartTime = Date.now() - httpServerStartTime;
+                        logger.error(`[MCPServer.start] HTTP Server error after ${httpStartTime}ms: ${error.message}`);
+                        logger.error(`[MCPServer.start] Error code: ${error.code}`);
+                        
+                        if (error.code === 'EADDRINUSE') {
+                            logger.error(`[MCPServer.start] Port ${this.port} is already in use`);
+                            reject(new Error(`Port ${this.port} is already in use. Please choose a different port or stop the other server.`));
+                        } else if (error.code === 'EACCES') {
+                            logger.error(`[MCPServer.start] Permission denied for port ${this.port}`);
+                            reject(new Error(`Permission denied for port ${this.port}. Try using a port >= 1024.`));
+                        } else {
+                            reject(error);
+                        }
+                    });
+
+                    // Add startup timeout to prevent hanging
+                    const startupTimeout = setTimeout(() => {
+                        logger.error(`[MCPServer.start] HTTP Server startup timed out after 10 seconds`);
+                        reject(new Error(`Server startup timed out after 10 seconds. Check if port ${this.port} is available.`));
+                    }, 10000);
+
+                    // Clear timeout when server starts successfully
+                    this.httpServer.on('listening', () => {
+                        clearTimeout(startupTimeout);
+                    });
                 });
+            };
+
+            // Add overall timeout for entire startup process (15 seconds)
+            const overallTimeout = 15000;
+            const timeoutPromise = new Promise<void>((_, reject) => {
+                setTimeout(() => {
+                    logger.error(`[MCPServer.start] Overall startup timed out after ${overallTimeout}ms`);
+                    reject(new Error(`MCP Server startup timed out after ${overallTimeout / 1000} seconds. This may indicate a network or port issue.`));
+                }, overallTimeout);
             });
+
+            await Promise.race([startupPromise(), timeoutPromise]);
         } catch (error) {
             logger.error(`[MCPServer.start] Failed to start MCP Server: ${error instanceof Error ? error.message : String(error)}`);
             throw error;
