@@ -442,12 +442,13 @@ export async function getDefinition(
     logger.info(`[getDefinition] Getting definition for ${uri.toString()} at position (${position.line},${position.character})`);
 
     try {
-        const definitions = await vscode.commands.executeCommand<vscode.DefinitionLink[]>(
+        const rawDefinitions = await vscode.commands.executeCommand<(vscode.DefinitionLink | vscode.Location)[]>(
             'vscode.executeDefinitionProvider',
             uri,
             position
         ) || [];
 
+        const definitions = rawDefinitions.map(normalizeToDefinitionLink);
         logger.info(`[getDefinition] Found ${definitions.length} definitions`);
 
         const formattedDefinitions = await Promise.all(definitions.map(async (def) => {
@@ -556,6 +557,24 @@ export async function getReferences(
  * @param position The position of the symbol
  * @returns Array of type definition locations
  */
+/**
+ * Normalize a Location or LocationLink (DefinitionLink) to a DefinitionLink.
+ * VS Code commands like executeTypeDefinitionProvider / executeImplementationProvider
+ * can return either type depending on the language server.
+ */
+function normalizeToDefinitionLink(item: vscode.Location | vscode.DefinitionLink): vscode.DefinitionLink {
+    if ('targetUri' in item) {
+        // Already a DefinitionLink / LocationLink
+        return item;
+    }
+    // It's a vscode.Location — adapt it
+    return {
+        targetUri: item.uri,
+        targetRange: item.range,
+        targetSelectionRange: item.range,
+    };
+}
+
 export async function getTypeDefinition(
     uri: vscode.Uri,
     position: vscode.Position
@@ -577,12 +596,13 @@ export async function getTypeDefinition(
     logger.info(`[getTypeDefinition] Getting type definition for ${uri.toString()} at position (${position.line},${position.character})`);
 
     try {
-        const definitions = await vscode.commands.executeCommand<vscode.DefinitionLink[]>(
+        const rawDefinitions = await vscode.commands.executeCommand<(vscode.DefinitionLink | vscode.Location)[]>(
             'vscode.executeTypeDefinitionProvider',
             uri,
             position
         ) || [];
 
+        const definitions = rawDefinitions.map(normalizeToDefinitionLink);
         logger.info(`[getTypeDefinition] Found ${definitions.length} type definitions`);
 
         const formattedDefinitions = await Promise.all(definitions.map(async (def) => {
@@ -633,12 +653,13 @@ export async function getImplementations(
     logger.info(`[getImplementations] Getting implementations for ${uri.toString()} at position (${position.line},${position.character})`);
 
     try {
-        const implementations = await vscode.commands.executeCommand<vscode.DefinitionLink[]>(
+        const rawImplementations = await vscode.commands.executeCommand<(vscode.DefinitionLink | vscode.Location)[]>(
             'vscode.executeImplementationProvider',
             uri,
             position
         ) || [];
 
+        const implementations = rawImplementations.map(normalizeToDefinitionLink);
         logger.info(`[getImplementations] Found ${implementations.length} implementations`);
 
         const formattedImplementations = await Promise.all(implementations.map(async (impl) => {
