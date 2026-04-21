@@ -984,28 +984,152 @@ export async function getDocumentSymbols(
 }
 
 /**
+ * Recursively walk a DocumentSymbol tree and collect exact-name matches.
+ */
+function collectDocumentSymbolMatches(
+    symbols: vscode.DocumentSymbol[],
+    query: string,
+    caseSensitive: boolean,
+    file: string,
+    results: Array<{
+        name: string;
+        kind: string;
+        file: string;
+        line: number;
+        character: number;
+        detail?: string;
+        containerPath: string[];
+    }>,
+    containerPath: string[] = []
+): void {
+    for (const sym of symbols) {
+        const match = caseSensitive
+            ? sym.name === query
+            : sym.name.toLowerCase() === query.toLowerCase();
+
+        if (match) {
+            results.push({
+                name: sym.name,
+                kind: symbolKindToString(sym.kind),
+                file,
+                // selectionRange pinpoints just the symbol name (like the @ picker)
+                line: sym.selectionRange.start.line + 1,
+                character: sym.selectionRange.start.character,
+                detail: sym.detail || undefined,
+                containerPath: [...containerPath],
+            });
+        }
+
+        if (sym.children && sym.children.length > 0) {
+            collectDocumentSymbolMatches(
+                sym.children, query, caseSensitive, file,
+                results, [...containerPath, sym.name]
+            );
+        }
+    }
+}
+
+/**
+ * Hybrid strategy: use workspace symbol provider to find candidate files,
+ * then use document symbol provider for precise selectionRange lookup.
+ * @param query The exact symbol name to search for
+ * @param caseSensitive Whether to match case-sensitively (default: true)
+ * @param maxResults Maximum number of results to return
+ */
+export async function searchSymbolInfo(query: string, caseSensitive: boolean = true, maxResults: number = 20): Promise<{
+    symbols: Array<{
+        name: string;
+        kind: string;
+        file: string;
+        line: number;
+        character: number;
+        detail?: string;
+        containerPath: string[];
+    }>;
+    total: number;
+    query: string;
+}> {
+    logger.info(`[searchSymbolInfo] query="${query}", caseSensitive=${caseSensitive}, maxResults=${maxResults}`);
+
+    try {
+        // Step 1: Use workspace symbol provider to find candidate files.
+        // We pass the query so LSP can narrow down candidate files efficiently.
+        const rawSymbols = await vscode.commands.executeCommand<vscode.SymbolInformation[]>(
+            'vscode.executeWorkspaceSymbolProvider',
+            query
+        ) || [];
+
+        logger.info(`[searchSymbolInfo] Workspace provider returned ${rawSymbols.length} candidates`);
+
+        // Step 2: Collect unique URIs from candidates
+        const uriSet = new Map<string, vscode.Uri>();
+        for (const s of rawSymbols) {
+            const key = s.location.uri.toString();
+            if (!uriSet.has(key)) {
+                uriSet.set(key, s.location.uri);
+            }
+        }
+
+        logger.info(`[searchSymbolInfo] Scanning ${uriSet.size} unique file(s) with document symbol provider`);
+
+        // Step 3: For each file, run document symbol provider and do precise name matching
+        const results: Array<{
+            name: string;
+            kind: string;
+            file: string;
+            line: number;
+            character: number;
+            detail?: string;
+            containerPath: string[];
+        }> = [];
+
+        for (const uri of uriSet.values()) {
+            if (results.length >= maxResults) { break; }
+
+            try {
+                const docSymbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
+                    'vscode.executeDocumentSymbolProvider',
+                    uri
+                ) || [];
+
+                const filePath = uriToWorkspacePath(uri);
+                collectDocumentSymbolMatches(docSymbols, query, caseSensitive, filePath, results);
+            } catch (e) {
+                logger.warn(`[searchSymbolInfo] Could not get document symbols for ${uri}: ${e}`);
+            }
+        }
+
+        const total = results.length;
+        return { symbols: results.slice(0, maxResults), total, query };
+    } catch (error) {
+        logger.error(`[searchSymbolInfo] Error: ${error instanceof Error ? error.message : String(error)}`);
+        throw error;
+    }
+}
+
+/**
  * Registers MCP symbol-related tools with the server
  * @param server MCP server instance
  */
 export function registerSymbolTools(server: McpServer): void {
-    // Add search_symbols_code tool
+    // Add fuzz_search_symbols_code tool
     server.tool(
-        'search_symbols_code',
-        `Searches for symbols (functions, classes, variables) across workspace using fuzzy matching.
+        'fuzz_search_symbols_code',
+        `Searches for symbols (functions, classes, variables) across workspace using fuzzy/prefix matching.
 
-        WHEN TO USE: Finding function/class definitions, exploring project structure, locating specific elements.
+        WHEN TO USE: Exploring project structure when you only know part of a symbol name (e.g., 'createW' finds 'createWorkspaceFile').
+        For precise location lookup by exact name, use search_symbol_info instead.
         
-        Search: Supports partial terms (e.g., 'createW' matches 'createWorkspaceFile'). Returns location and container info.
-        Limit results to avoid overwhelming output - increase maxResults only if needed.`,
+        Returns location and container info. Limit results to avoid overwhelming output.`,
         {
             query: z.string().describe('The search query for symbol names'),
             maxResults: z.number().optional().default(10).describe('Maximum number of results to return (default: 10)')
         },
         async ({ query, maxResults = 10 }): Promise<CallToolResult> => {
-            logger.info(`[search_symbols_code] Tool called with query="${query}", maxResults=${maxResults}`);
+            logger.info(`[fuzz_search_symbols_code] Tool called with query="${query}", maxResults=${maxResults}`);
 
             try {
-                logger.info('[search_symbols_code] Searching workspace symbols');
+                logger.info('[fuzz_search_symbols_code] Searching workspace symbols');
                 const result = await searchWorkspaceSymbols(query, maxResults);
 
                 let resultText: string;
@@ -1038,10 +1162,71 @@ export function registerSymbolTools(server: McpServer): void {
                         }
                     ]
                 };
-                logger.info('[search_symbols_code] Successfully completed');
+                logger.info('[fuzz_search_symbols_code] Successfully completed');
                 return callResult;
             } catch (error) {
-                logger.error(`[search_symbols_code] Error in tool: ${error instanceof Error ? error.message : String(error)}`);
+                logger.error(`[fuzz_search_symbols_code] Error in tool: ${error instanceof Error ? error.message : String(error)}`);
+                throw error;
+            }
+        }
+    );
+
+    // Add search_symbol_info tool
+    server.tool(
+        'search_symbol_info',
+        `Precisely locates a symbol by exact name and returns its declaration file, line, and column.
+
+        WHEN TO USE: You know the exact symbol name and need file/line/col to pass to other tools
+        (get_definition_code, get_references_code, get_call_hierarchy_code, etc.).
+        Uses a hybrid strategy: workspace symbol provider finds candidate files, then document symbol
+        provider (same as the VS Code @ picker) gives precise selectionRange for each match.
+        For fuzzy/prefix exploration use fuzz_search_symbols_code instead.
+        
+        Returns: workspace-relative file path, 1-based line, character offset, symbol kind,
+        detail (e.g. signature), and containerPath (e.g. ["ClassName", "methodName"]).`,
+        {
+            query: z.string().describe('The exact symbol name to search for'),
+            caseSensitive: z.boolean().optional().default(true).describe('Case-sensitive name match (default: true)'),
+            maxResults: z.number().optional().default(20).describe('Maximum number of results to return (default: 20)')
+        },
+        async ({ query, caseSensitive = true, maxResults = 20 }): Promise<CallToolResult> => {
+            logger.info(`[search_symbol_info] Tool called with query="${query}", caseSensitive=${caseSensitive}, maxResults=${maxResults}`);
+
+            try {
+                const result = await searchSymbolInfo(query, caseSensitive, maxResults);
+
+                let resultText: string;
+
+                if (result.symbols.length === 0) {
+                    resultText = `No symbol found with name "${query}".\nTip: check spelling, or use fuzz_search_symbols_code for fuzzy search.`;
+                } else {
+                    resultText = `Found ${result.total} symbol(s) named "${query}"`;
+                    if (result.total > maxResults) {
+                        resultText += ` (showing first ${maxResults})`;
+                    }
+                    resultText += ':\n\n';
+
+                    for (const sym of result.symbols) {
+                        resultText += `name: ${sym.name}\n`;
+                        resultText += `kind: ${sym.kind}\n`;
+                        if (sym.detail) {
+                            resultText += `detail: ${sym.detail}\n`;
+                        }
+                        if (sym.containerPath.length > 0) {
+                            resultText += `container: ${sym.containerPath.join(' > ')}\n`;
+                        }
+                        resultText += `file: ${sym.file}\n`;
+                        resultText += `line: ${sym.line}\n`;
+                        resultText += `character: ${sym.character}\n\n`;
+                    }
+                }
+
+                logger.info('[search_symbol_info] Successfully completed');
+                return {
+                    content: [{ type: 'text', text: resultText }]
+                };
+            } catch (error) {
+                logger.error(`[search_symbol_info] Error: ${error instanceof Error ? error.message : String(error)}`);
                 throw error;
             }
         }
@@ -1053,7 +1238,7 @@ export function registerSymbolTools(server: McpServer): void {
         `Gets the definition location and code block for a symbol (go to definition).
 
         WHEN TO USE: Finding where a function/class/variable is actually defined, getting the full implementation code.
-        USE search_symbols_code for: finding symbols by name across the project.
+        USE search_symbol_info to find the file/line/col of a symbol first, then pass it here.
         USE get_symbol_definition_code for: getting type/docs via hover (lighter, no code block).
         
         Returns the full code block at the definition location. Requires exact symbol name and line number.`,
