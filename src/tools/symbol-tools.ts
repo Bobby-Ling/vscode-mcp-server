@@ -1507,7 +1507,7 @@ export function registerSymbolTools(server: FastMCP): void {
 
         WHEN TO USE: Understanding function parameters, checking available overloads, getting API documentation.
         
-        Requires exact symbol name and line number. Position cursor near function call or definition.`,
+        Requires exact symbol name and line number. The tool automatically positions the cursor inside the call parentheses after the symbol name, which is required by the LSP signature help provider.`,
         parameters: z.object({
             path: z.string().describe('The path to the file containing the symbol'),
             line: z.number().describe('The line number of the symbol (1-based)'),
@@ -1526,7 +1526,13 @@ export function registerSymbolTools(server: FastMCP): void {
                 if (!lineText) { throw new Error(`Line ${line} not found in file: ${path}`); }
                 const character = findSymbolInLine(lineText, symbol);
                 if (character === -1) { return { content: [{ type: 'text' as const, text: `Symbol "${symbol}" not found on line ${line} in file: ${path}` }] }; }
-                const position = new vscode.Position(zeroBasedLine, character);
+                // LSP signature help requires cursor to be inside the call parentheses.
+                // Scan forward from the symbol name end to find '(' and position after it.
+                const symbolEnd = character + symbol.length;
+                const openParenIdx = lineText.indexOf('(', symbolEnd);
+                const sigCharacter = openParenIdx !== -1 ? openParenIdx + 1 : character;
+                const position = new vscode.Position(zeroBasedLine, sigCharacter);
+                logger.info(`[get_signature_help_code] Using position (${zeroBasedLine}, ${sigCharacter}) for signature help`);
                 const result = await getSignatureHelp(uri, position);
                 let resultText: string;
                 if (result.signatures.length === 0) {
@@ -1563,18 +1569,21 @@ export function registerSymbolTools(server: FastMCP): void {
 
     server.addTool({
         name: 'get_call_hierarchy_code',
-        description: `Prepares call hierarchy for a function/method (entry point for caller/callee analysis).
+        description: `Gets full call hierarchy for a function/method, including who calls it (incoming) and what it calls (outgoing).
 
-        WHEN TO USE: Understanding function call relationships, preparing for call graph analysis, entry point for incoming/outgoing calls.
+        WHEN TO USE: Understanding function call relationships, tracing callers and callees, analyzing call graphs.
         
-        Requires exact symbol name and line number. Works on function/method definitions. Use this as entry point before querying incoming/outgoing calls.`,
+        Requires exact symbol name and line number. Works on function/method definitions.
+        Use includeIncoming and includeOutgoing to control which directions to query.`,
         parameters: z.object({
             path: z.string().describe('The path to the file containing the symbol'),
             line: z.number().describe('The line number of the symbol (1-based)'),
-            symbol: z.string().describe('The symbol name to look for on the specified line')
+            symbol: z.string().describe('The symbol name to look for on the specified line'),
+            includeIncoming: z.boolean().optional().default(true).describe('Whether to include incoming calls (who calls this function). Default: true'),
+            includeOutgoing: z.boolean().optional().default(true).describe('Whether to include outgoing calls (what this function calls). Default: true')
         }),
-        execute: async ({ path, line, symbol }) => {
-            logger.info(`[get_call_hierarchy_code] Tool called with path="${path}", line=${line}, symbol="${symbol}"`);
+        execute: async ({ path, line, symbol, includeIncoming = true, includeOutgoing = true }) => {
+            logger.info(`[get_call_hierarchy_code] Tool called with path="${path}", line=${line}, symbol="${symbol}", includeIncoming=${includeIncoming}, includeOutgoing=${includeOutgoing}`);
             const zeroBasedLine = line - 1;
             try {
                 if (!vscode.workspace.workspaceFolders) { throw new Error('No workspace folder open'); }
@@ -1587,16 +1596,46 @@ export function registerSymbolTools(server: FastMCP): void {
                 const character = findSymbolInLine(lineText, symbol);
                 if (character === -1) { return { content: [{ type: 'text' as const, text: `Symbol "${symbol}" not found on line ${line} in file: ${path}` }] }; }
                 const position = new vscode.Position(zeroBasedLine, character);
-                const result = await prepareCallHierarchy(uri, position);
+                // Prepare call hierarchy entry points (raw items needed for follow-up queries)
+                const rawItems = await vscode.commands.executeCommand<vscode.CallHierarchyItem[]>(
+                    'vscode.prepareCallHierarchy',
+                    uri,
+                    position
+                ) || [];
                 let resultText: string;
-                if (result.items.length === 0) {
+                if (rawItems.length === 0) {
                     resultText = `No call hierarchy found for symbol "${symbol}" at ${path}:${line}:${character}.\n\nThis may mean:\n- The symbol is not a function/method\n- The language does not support call hierarchy\n- The symbol was not recognized as callable`;
                 } else {
-                    resultText = `Call hierarchy entry point(s) for symbol "${symbol}" at ${path}:${line}:${character}:\n\nFound ${result.total} item(s). Use these as starting points for incoming/outgoing call queries.\n\n`;
-                    for (const item of result.items) {
-                        resultText += `- **${item.name}** (${item.kind})`;
+                    resultText = `Call hierarchy for symbol "${symbol}" at ${path}:${line}:${character}:\n\n`;
+                    for (const rawItem of rawItems) {
+                        const item = formatCallHierarchyItem(rawItem);
+                        resultText += `## ${item.name} (${item.kind})`;
                         if (item.detail) { resultText += ` - ${item.detail}`; }
-                        resultText += `\n  Location: ${item.location}\n  Range: ${item.range.start.line}:${item.range.start.character}-${item.range.end.line}:${item.range.end.character}\n\n`;
+                        resultText += `\nLocation: ${item.location}\n\n`;
+                        if (includeIncoming) {
+                            const incomingCalls = await vscode.commands.executeCommand<vscode.CallHierarchyIncomingCall[]>(
+                                'vscode.provideIncomingCalls',
+                                rawItem
+                            ) || [];
+                            resultText += `**Incoming calls** (${incomingCalls.length} caller(s)):\n`;
+                            for (const call of incomingCalls) {
+                                const caller = formatCallHierarchyItem(call.from);
+                                resultText += `  - ${caller.name} (${caller.kind}) at ${caller.location}\n`;
+                            }
+                            resultText += '\n';
+                        }
+                        if (includeOutgoing) {
+                            const outgoingCalls = await vscode.commands.executeCommand<vscode.CallHierarchyOutgoingCall[]>(
+                                'vscode.provideOutgoingCalls',
+                                rawItem
+                            ) || [];
+                            resultText += `**Outgoing calls** (${outgoingCalls.length} callee(s)):\n`;
+                            for (const call of outgoingCalls) {
+                                const callee = formatCallHierarchyItem(call.to);
+                                resultText += `  - ${callee.name} (${callee.kind}) at ${callee.location}\n`;
+                            }
+                            resultText += '\n';
+                        }
                     }
                 }
                 logger.info('[get_call_hierarchy_code] Successfully completed');
