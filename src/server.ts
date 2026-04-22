@@ -61,9 +61,9 @@ export class MCPServer {
             }
         });
 
-        // Initialize transport with session ID generator for proper state management
+        // Initialize transport
         this.transport = new StreamableHTTPServerTransport({
-            sessionIdGenerator: () => `session-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
+            sessionIdGenerator: undefined,
         });
 
         // Note: setupTools() is no longer called here
@@ -124,32 +124,18 @@ export class MCPServer {
         // Handle POST requests for client-to-server communication
         this.app.post('/mcp', async (req, res) => {
             logger.info(`Request received: ${req.method} ${req.url}`);
-            logger.info(`Request body: ${JSON.stringify(req.body).substring(0, 500)}`);
-
-            // Track response
-            const originalEnd = res.end.bind(res);
-            res.end = (...args: any[]) => {
-                logger.info(`Response sent: status=${res.statusCode}`);
-                return originalEnd(...args);
-            };
-
             try {
                 await this.transport.handleRequest(req, res, req.body);
-                logger.info(`Request handled successfully`);
             } catch (error) {
-                const errorMessage = error instanceof Error ? error.message : String(error);
-                const errorStack = error instanceof Error ? error.stack : '';
-                logger.error(`Error handling MCP request: ${errorMessage}`);
-                logger.error(`Error stack: ${errorStack}`);
+                logger.error(`Error handling MCP request: ${error instanceof Error ? error.message : String(error)}`);
                 if (!res.headersSent) {
                     res.status(500).json({
                         jsonrpc: '2.0',
                         error: {
                             code: -32603,
                             message: 'Internal server error',
-                            data: errorMessage
                         },
-                        id: req.body?.id || null,
+                        id: null,
                     });
                 }
             }
@@ -262,7 +248,7 @@ export class MCPServer {
                         const httpStartTime = Date.now() - httpServerStartTime;
                         logger.error(`[MCPServer.start] HTTP Server error after ${httpStartTime}ms: ${error.message}`);
                         logger.error(`[MCPServer.start] Error code: ${error.code}`);
-                        
+
                         if (error.code === 'EADDRINUSE') {
                             logger.error(`[MCPServer.start] Port ${this.port} is already in use`);
                             reject(new Error(`Port ${this.port} is already in use. Please choose a different port or stop the other server.`));
