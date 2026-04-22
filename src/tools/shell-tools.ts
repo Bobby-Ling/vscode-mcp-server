@@ -1,7 +1,6 @@
 import * as vscode from 'vscode';
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { FastMCP } from 'fastmcp';
 import { z } from 'zod';
-import { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
 /**
  * Waits briefly for shell integration to become available
@@ -45,7 +44,7 @@ export async function executeShellCommand(
     timeout: number = 10000
 ): Promise<{ output: string }> {
     terminal.show();
-    
+
     // Build full command including cd if cwd is specified
     let fullCommand = command;
     if (cwd) {
@@ -56,20 +55,20 @@ export async function executeShellCommand(
             fullCommand = `cd ${quotedPath} && ${command}`;
         }
     }
-    
+
     // Create timeout promise
     const timeoutPromise = new Promise<never>((_, reject) => {
         setTimeout(() => reject(new Error(`Command timed out after ${timeout}ms`)), timeout);
     });
-    
+
     // Create execution promise
     const executionPromise = async (): Promise<{ output: string }> => {
         // Execute the command using shell integration API
         const execution = terminal.shellIntegration!.executeCommand(fullCommand);
-        
+
         // Capture output using the stream
         let output = '';
-        
+
         try {
             // Access the read stream (handling possible API differences)
             const outputStream = (execution as any).read();
@@ -79,10 +78,10 @@ export async function executeShellCommand(
         } catch (error) {
             throw new Error(`Failed to read command output: ${error}`);
         }
-        
+
         return { output };
     };
-    
+
     // Race between execution and timeout
     return Promise.race([executionPromise(), timeoutPromise]);
 }
@@ -92,28 +91,27 @@ export async function executeShellCommand(
  * @param server MCP server instance
  * @param terminal The terminal to use for command execution
  */
-export function registerShellTools(server: McpServer, terminal?: vscode.Terminal): void {
-    // Add execute_shell_command tool
-    server.tool(
-        'execute_shell_command_code',
-        `Executes shell commands in VS Code integrated terminal.
+export function registerShellTools(server: FastMCP, terminal?: vscode.Terminal): void {
+    server.addTool({
+        name: 'execute_shell_command_code',
+        description: `Executes shell commands in VS Code integrated terminal.
 
         WHEN TO USE: Running CLI commands, builds, git operations, npm/pip installs.
         
         Working directory: Use cwd to run commands in specific directories. Defaults to workspace root. If you get unexpected results, ensure the cwd is correct.
 
         Timeout: Commands must complete within specified time (default 10s) or the tool will return a timeout error, but the command may still be running in the terminal.`,
-        {
+        parameters: z.object({
             command: z.string().describe('The shell command to execute'),
             cwd: z.string().optional().default('.').describe('Optional working directory for the command'),
             timeout: z.number().optional().default(10000).describe('Command timeout in milliseconds (default: 10000)')
-        },
-        async ({ command, cwd, timeout = 10000 }): Promise<CallToolResult> => {
+        }),
+        execute: async ({ command, cwd, timeout = 10000 }) => {
             try {
                 if (!terminal) {
                     throw new Error('Terminal not available');
                 }
-                
+
                 // Check for shell integration - wait briefly if not available
                 if (!terminal.shellIntegration) {
                     const shellIntegrationAvailable = await waitForShellIntegration(terminal);
@@ -121,22 +119,21 @@ export function registerShellTools(server: McpServer, terminal?: vscode.Terminal
                         throw new Error('Shell integration not available in terminal');
                     }
                 }
-                
+
                 const { output } = await executeShellCommand(terminal, command, cwd, timeout);
-                
-                const result: CallToolResult = {
+
+                return {
                     content: [
                         {
-                            type: 'text',
+                            type: 'text' as const,
                             text: `Command: ${command}\n\nOutput:\n${output}`
                         }
                     ]
                 };
-                return result;
             } catch (error) {
                 console.error('[execute_shell_command] Error in tool:', error);
                 throw error;
             }
         }
-    );
+    });
 }

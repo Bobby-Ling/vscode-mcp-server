@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
-import { MCPServer, ToolConfiguration } from './server';
-import { listWorkspaceFiles } from './tools/file-tools';
-import { logger } from './utils/logger';
+import { MCPServer, ToolConfiguration } from './server.js';
+import { listWorkspaceFiles } from './tools/file-tools.js';
+import { logger } from './utils/logger.js';
 
 // Re-export for testing purposes
 export { MCPServer };
@@ -225,7 +225,7 @@ export async function activate(context: vscode.ExtensionContext) {
         // Only start the server if enabled
         if (serverEnabled) {
             logger.info('[activate] Server is enabled, starting initialization...');
-            
+
             // Create the shared terminal
             logger.info('[activate] Creating shared terminal...');
             const terminal = getExtensionTerminal(context);

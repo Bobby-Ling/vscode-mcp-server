@@ -1,10 +1,9 @@
 import * as vscode from 'vscode';
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { FastMCP } from 'fastmcp';
 import { z } from 'zod';
-import { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import * as path from 'path';
+import * as path_module from 'path';
 import * as fs from 'fs';
-import { logger } from '../utils/logger';
+import { logger } from '../utils/logger.js';
 
 /**
  * Convert a symbol kind to a string representation
@@ -57,7 +56,7 @@ function uriToWorkspacePath(uri: vscode.Uri): string {
     const workspaceRoot = workspaceFolder.uri.fsPath;
 
     // Convert to relative path
-    const relativePath = path.relative(workspaceRoot, uri.fsPath);
+    const relativePath = path_module.relative(workspaceRoot, uri.fsPath);
     return relativePath;
 }
 
@@ -1132,70 +1131,49 @@ export async function searchSymbolInfo(query: string, caseSensitive: boolean = t
  * Registers MCP symbol-related tools with the server
  * @param server MCP server instance
  */
-export function registerSymbolTools(server: McpServer): void {
-    // Add fuzz_search_symbols_code tool
-    server.tool(
-        'fuzz_search_symbols_code',
-        `Searches for symbols (functions, classes, variables) across workspace using fuzzy/prefix matching.
+export function registerSymbolTools(server: FastMCP): void {
+    server.addTool({
+        name: 'fuzz_search_symbols_code',
+        description: `Searches for symbols (functions, classes, variables) across workspace using fuzzy/prefix matching.
 
         WHEN TO USE: Exploring project structure when you only know part of a symbol name (e.g., 'createW' finds 'createWorkspaceFile').
         For precise location lookup by exact name, use search_symbol_info instead.
         
         Returns location and container info. Limit results to avoid overwhelming output.`,
-        {
+        parameters: z.object({
             query: z.string().describe('The search query for symbol names'),
             maxResults: z.number().optional().default(10).describe('Maximum number of results to return (default: 10)')
-        },
-        async ({ query, maxResults = 10 }): Promise<CallToolResult> => {
+        }),
+        execute: async ({ query, maxResults = 10 }) => {
             logger.info(`[fuzz_search_symbols_code] Tool called with query="${query}", maxResults=${maxResults}`);
-
             try {
                 logger.info('[fuzz_search_symbols_code] Searching workspace symbols');
                 const result = await searchWorkspaceSymbols(query, maxResults);
-
                 let resultText: string;
-
                 if (result.symbols.length === 0) {
                     resultText = `No symbols found matching query "${query}".`;
                 } else {
                     resultText = `Found ${result.total} symbols matching query "${query}"`;
-
-                    if (result.total > maxResults) {
-                        resultText += ` (showing first ${maxResults})`;
-                    }
-
+                    if (result.total > maxResults) { resultText += ` (showing first ${maxResults})`; }
                     resultText += ":\n\n";
-
                     for (const symbol of result.symbols) {
                         resultText += `${symbol.name} (${symbol.kind})`;
-                        if (symbol.containerName) {
-                            resultText += ` in ${symbol.containerName}`;
-                        }
+                        if (symbol.containerName) { resultText += ` in ${symbol.containerName}`; }
                         resultText += `\nLocation: ${symbol.location}\n\n`;
                     }
                 }
-
-                const callResult: CallToolResult = {
-                    content: [
-                        {
-                            type: 'text',
-                            text: resultText
-                        }
-                    ]
-                };
                 logger.info('[fuzz_search_symbols_code] Successfully completed');
-                return callResult;
+                return { content: [{ type: 'text' as const, text: resultText }] };
             } catch (error) {
                 logger.error(`[fuzz_search_symbols_code] Error in tool: ${error instanceof Error ? error.message : String(error)}`);
                 throw error;
             }
         }
-    );
+    });
 
-    // Add search_symbol_info tool
-    server.tool(
-        'search_symbol_info',
-        `Precisely locates a symbol by exact name and returns its declaration file, line, and column.
+    server.addTool({
+        name: 'search_symbol_info',
+        description: `Precisely locates a symbol by exact name and returns its declaration file, line, and column.
 
         WHEN TO USE: You know the exact symbol name and need file/line/col to pass to other tools
         (get_definition_code, get_references_code, get_call_hierarchy_code, etc.).
@@ -1205,368 +1183,210 @@ export function registerSymbolTools(server: McpServer): void {
         
         Returns: workspace-relative file path, 1-based line, character offset, symbol kind,
         detail (e.g. signature), and containerPath (e.g. ["ClassName", "methodName"]).`,
-        {
+        parameters: z.object({
             query: z.string().describe('The exact symbol name to search for'),
             caseSensitive: z.boolean().optional().default(true).describe('Case-sensitive name match (default: true)'),
             maxResults: z.number().optional().default(20).describe('Maximum number of results to return (default: 20)')
-        },
-        async ({ query, caseSensitive = true, maxResults = 20 }): Promise<CallToolResult> => {
+        }),
+        execute: async ({ query, caseSensitive = true, maxResults = 20 }) => {
             logger.info(`[search_symbol_info] Tool called with query="${query}", caseSensitive=${caseSensitive}, maxResults=${maxResults}`);
-
             try {
                 const result = await searchSymbolInfo(query, caseSensitive, maxResults);
-
                 let resultText: string;
-
                 if (result.symbols.length === 0) {
                     resultText = `No symbol found with name "${query}".\nTip: check spelling, or use fuzz_search_symbols_code for fuzzy search.`;
                 } else {
                     resultText = `Found ${result.total} symbol(s) named "${query}"`;
-                    if (result.total > maxResults) {
-                        resultText += ` (showing first ${maxResults})`;
-                    }
+                    if (result.total > maxResults) { resultText += ` (showing first ${maxResults})`; }
                     resultText += ':\n\n';
-
                     for (const sym of result.symbols) {
-                        resultText += `name: ${sym.name}\n`;
-                        resultText += `kind: ${sym.kind}\n`;
-                        if (sym.detail) {
-                            resultText += `detail: ${sym.detail}\n`;
-                        }
-                        if (sym.containerPath.length > 0) {
-                            resultText += `container: ${sym.containerPath.join(' > ')}\n`;
-                        }
-                        resultText += `file: ${sym.file}\n`;
-                        resultText += `line: ${sym.line}\n`;
-                        resultText += `character: ${sym.character}\n\n`;
+                        resultText += `name: ${sym.name}\nkind: ${sym.kind}\n`;
+                        if (sym.detail) { resultText += `detail: ${sym.detail}\n`; }
+                        if (sym.containerPath.length > 0) { resultText += `container: ${sym.containerPath.join(' > ')}\n`; }
+                        resultText += `file: ${sym.file}\nline: ${sym.line}\ncharacter: ${sym.character}\n\n`;
                     }
                 }
-
                 logger.info('[search_symbol_info] Successfully completed');
-                return {
-                    content: [{ type: 'text', text: resultText }]
-                };
+                return { content: [{ type: 'text' as const, text: resultText }] };
             } catch (error) {
                 logger.error(`[search_symbol_info] Error: ${error instanceof Error ? error.message : String(error)}`);
                 throw error;
             }
         }
-    );
+    });
 
-    // Add get_definition_code tool
-    server.tool(
-        'get_definition_code',
-        `Gets the definition location and code block for a symbol (go to definition).
+    server.addTool({
+        name: 'get_definition_code',
+        description: `Gets the definition location and code block for a symbol (go to definition).
 
         WHEN TO USE: Finding where a function/class/variable is actually defined, getting the full implementation code.
         USE search_symbol_info to find the file/line/col of a symbol first, then pass it here.
         USE get_symbol_definition_code for: getting type/docs via hover (lighter, no code block).
         
         Returns the full code block at the definition location. Requires exact symbol name and line number.`,
-        {
+        parameters: z.object({
             path: z.string().describe('The path to the file containing the symbol'),
             line: z.number().describe('The line number of the symbol (1-based)'),
             symbol: z.string().describe('The symbol name to look for on the specified line')
-        },
-        async ({ path, line, symbol }): Promise<CallToolResult> => {
+        }),
+        execute: async ({ path, line, symbol }) => {
             logger.info(`[get_definition_code] Tool called with path="${path}", line=${line}, symbol="${symbol}"`);
-
             const zeroBasedLine = line - 1;
             try {
-                if (!vscode.workspace.workspaceFolders) {
-                    throw new Error('No workspace folder open');
-                }
-
+                if (!vscode.workspace.workspaceFolders) { throw new Error('No workspace folder open'); }
                 const workspaceRoot = vscode.workspace.workspaceFolders[0].uri.fsPath;
-                const fullPath = require('path').resolve(workspaceRoot, path);
+                const fullPath = path_module.resolve(workspaceRoot, path);
                 const uri = vscode.Uri.file(fullPath);
-
-                try {
-                    await vscode.workspace.fs.stat(uri);
-                } catch (error) {
-                    throw new Error(`File not found: ${path}`);
-                }
-
+                try { await vscode.workspace.fs.stat(uri); } catch { throw new Error(`File not found: ${path}`); }
                 const lineText = await getLineText(uri, zeroBasedLine);
-                if (!lineText) {
-                    throw new Error(`Line ${line} not found in file: ${path}`);
-                }
-
+                if (!lineText) { throw new Error(`Line ${line} not found in file: ${path}`); }
                 const character = findSymbolInLine(lineText, symbol);
-                if (character === -1) {
-                    return {
-                        content: [{ type: 'text', text: `Symbol "${symbol}" not found on line ${line} in file: ${path}` }]
-                    };
-                }
-
+                if (character === -1) { return { content: [{ type: 'text' as const, text: `Symbol "${symbol}" not found on line ${line} in file: ${path}` }] }; }
                 const position = new vscode.Position(zeroBasedLine, character);
                 const result = await getDefinition(uri, position);
-
                 let resultText: string;
                 if (result.definitions.length === 0) {
                     resultText = `No definition found for symbol "${symbol}" at ${path}:${line}:${character}.`;
                 } else {
                     resultText = `Found ${result.total} definition(s) for symbol "${symbol}" at ${path}:${line}:${character}:\n\n`;
-
                     for (const def of result.definitions) {
-                        resultText += `**Definition at**: ${def.location}\n`;
-                        resultText += `**Range**: ${def.targetRange.start.line}:${def.targetRange.start.character} - ${def.targetRange.end.line}:${def.targetRange.end.character}\n\n`;
-
-                        if (def.preview) {
-                            resultText += `**Preview**: \`${def.preview}\`\n\n`;
-                        }
-
-                        if (def.fullCode) {
-                            const lineCount = def.targetRange.end.line - def.targetRange.start.line + 1;
-                            resultText += `**Code** (${lineCount} lines):\n\`\`\`\n${def.fullCode}\n\`\`\`\n\n`;
-                        }
-
+                        resultText += `**Definition at**: ${def.location}\n**Range**: ${def.targetRange.start.line}:${def.targetRange.start.character} - ${def.targetRange.end.line}:${def.targetRange.end.character}\n\n`;
+                        if (def.preview) { resultText += `**Preview**: \`${def.preview}\`\n\n`; }
+                        if (def.fullCode) { const lineCount = def.targetRange.end.line - def.targetRange.start.line + 1; resultText += `**Code** (${lineCount} lines):\n\`\`\`\n${def.fullCode}\n\`\`\`\n\n`; }
                         resultText += `---\n\n`;
                     }
                 }
-
                 logger.info('[get_definition_code] Successfully completed');
-                return { content: [{ type: 'text', text: resultText }] };
+                return { content: [{ type: 'text' as const, text: resultText }] };
             } catch (error) {
                 logger.error(`[get_definition_code] Error in tool: ${error instanceof Error ? error.message : String(error)}`);
                 throw error;
             }
         }
-    );
+    });
 
-    // Add get_symbol_definition_code tool with updated parameters
-    server.tool(
-        'get_symbol_definition_code',
-        `Gets definition information for a symbol using hover data (type, docs, source).
+    server.addTool({
+        name: 'get_symbol_definition_code',
+        description: `Gets definition information for a symbol using hover data (type, docs, source).
 
         WHEN TO USE: Understanding what a symbol represents, checking function signatures, quick API reference.
         USE search_symbols_code instead for: finding symbols by name across the project.
         
         Requires exact symbol name and line number. If symbol not found on line, returns clear message.`,
-        {
+        parameters: z.object({
             path: z.string().describe('The path to the file containing the symbol'),
             line: z.number().describe('The line number of the symbol (1-based)'),
             symbol: z.string().describe('The symbol name to look for on the specified line')
-        },
-        async ({ path, line, symbol }): Promise<CallToolResult> => {
+        }),
+        execute: async ({ path, line, symbol }) => {
             logger.info(`[get_symbol_definition_code] Tool called with path="${path}", line=${line}, symbol="${symbol}"`);
-
-            // Convert 1-based input to 0-based for VS Code API
             const zeroBasedLine = line - 1;
             try {
-                if (!vscode.workspace.workspaceFolders) {
-                    throw new Error('No workspace folder open');
-                }
-
+                if (!vscode.workspace.workspaceFolders) { throw new Error('No workspace folder open'); }
                 const workspaceRoot = vscode.workspace.workspaceFolders[0].uri.fsPath;
-                const fullPath = require('path').resolve(workspaceRoot, path);
+                const fullPath = path_module.resolve(workspaceRoot, path);
                 const uri = vscode.Uri.file(fullPath);
-
-                // Check if file exists
-                try {
-                    await vscode.workspace.fs.stat(uri);
-                } catch (error) {
-                    throw new Error(`File not found: ${path}`);
-                }
-
-                // Get the content of the specified line
+                try { await vscode.workspace.fs.stat(uri); } catch { throw new Error(`File not found: ${path}`); }
                 const lineText = await getLineText(uri, zeroBasedLine);
-                if (!lineText) {
-                    throw new Error(`Line ${line} not found in file: ${path}`);
-                }
-
-                // Find the character position of the symbol in the line
+                if (!lineText) { throw new Error(`Line ${line} not found in file: ${path}`); }
                 const character = findSymbolInLine(lineText, symbol);
-                if (character === -1) {
-                    return {
-                        content: [
-                            {
-                                type: 'text',
-                                text: `Symbol "${symbol}" not found on line ${line} in file: ${path}`
-                            }
-                        ]
-                    };
-                }
-
-                // Create a position object
+                if (character === -1) { return { content: [{ type: 'text' as const, text: `Symbol "${symbol}" not found on line ${line} in file: ${path}` }] }; }
                 const position = new vscode.Position(zeroBasedLine, character);
-
-                // Get hover information
                 const hoverResult = await getSymbolHoverInfo(uri, position);
-
                 let resultText: string;
-
                 if (hoverResult.hovers.length === 0) {
                     resultText = `No definition information found for symbol "${symbol}" at ${path}:${line}:${character}.`;
                 } else {
                     resultText = `Definition information for symbol "${symbol}" at ${path}:${line}:${character}:\n\n`;
-
                     for (const hover of hoverResult.hovers) {
-                        // Add preview if available
-                        if (hover.preview) {
-                            resultText += `Code context: \`${hover.preview}\`\n\n`;
-                        }
-
-                        // Add contents
-                        for (const content of hover.contents) {
-                            resultText += `${content}\n\n`;
-                        }
-
-                        // Add range if available
-                        if (hover.range) {
-                            resultText += `Symbol range: [${hover.range.start.line}:${hover.range.start.character}] to [${hover.range.end.line}:${hover.range.end.character}]\n\n`;
-                        }
+                        if (hover.preview) { resultText += `Code context: \`${hover.preview}\`\n\n`; }
+                        for (const content of hover.contents) { resultText += `${content}\n\n`; }
+                        if (hover.range) { resultText += `Symbol range: [${hover.range.start.line}:${hover.range.start.character}] to [${hover.range.end.line}:${hover.range.end.character}]\n\n`; }
                     }
                 }
-
-                const callResult: CallToolResult = {
-                    content: [
-                        {
-                            type: 'text',
-                            text: resultText
-                        }
-                    ]
-                };
                 logger.info('[get_symbol_definition_code] Successfully completed');
-                return callResult;
+                return { content: [{ type: 'text' as const, text: resultText }] };
             } catch (error) {
                 logger.error(`[get_symbol_definition_code] Error in tool: ${error instanceof Error ? error.message : String(error)}`);
                 throw error;
             }
         }
-    );
+    });
 
-    // Add get_document_symbols_code tool
-    server.tool(
-        'get_document_symbols_code',
-        `Gets complete symbol outline for a file showing hierarchical structure and line numbers.
+    server.addTool({
+        name: 'get_document_symbols_code',
+        description: `Gets complete symbol outline for a file showing hierarchical structure and line numbers.
 
         WHEN TO USE: Understanding file structure, getting overview of all symbols, finding symbol positions. This tool should be be preferred over reading the file using read_file_code when only an overview of the file is needed.
         USE search_symbols_code instead for: finding specific symbols by name across the project.
         
         Shows classes, functions, methods, variables with line ranges. Use maxDepth for large files to avoid deep nesting.`,
-        {
+        parameters: z.object({
             path: z.string().describe('The path to the file to analyze (relative to workspace)'),
             maxDepth: z.number().optional().describe('Maximum nesting depth to display (optional)')
-        },
-        async ({ path, maxDepth }): Promise<CallToolResult> => {
+        }),
+        execute: async ({ path, maxDepth }) => {
             logger.info(`[get_document_symbols_code] Tool called with path="${path}", maxDepth=${maxDepth}`);
-
             try {
-                if (!vscode.workspace.workspaceFolders) {
-                    throw new Error('No workspace folder open');
-                }
-
+                if (!vscode.workspace.workspaceFolders) { throw new Error('No workspace folder open'); }
                 const workspaceRoot = vscode.workspace.workspaceFolders[0].uri.fsPath;
-                const fullPath = require('path').resolve(workspaceRoot, path);
+                const fullPath = path_module.resolve(workspaceRoot, path);
                 const uri = vscode.Uri.file(fullPath);
-
-                // Check if file exists
-                try {
-                    await vscode.workspace.fs.stat(uri);
-                } catch (error) {
-                    throw new Error(`File not found: ${path}`);
-                }
-
+                try { await vscode.workspace.fs.stat(uri); } catch { throw new Error(`File not found: ${path}`); }
                 logger.info('[get_document_symbols_code] Getting document symbols');
                 const result = await getDocumentSymbols(uri, maxDepth);
-
                 let resultText: string;
-
                 if (result.symbols.length === 0) {
                     resultText = `No symbols found in file: ${path}`;
                 } else {
                     resultText = `Document symbols for ${path} (${result.total} total symbols):\n\n`;
-
-                    // Add summary by kind
-                    const kindSummary = Object.entries(result.totalByKind)
-                        .map(([kind, count]) => `${count} ${kind}${count !== 1 ? 's' : ''}`)
-                        .join(', ');
+                    const kindSummary = Object.entries(result.totalByKind).map(([kind, count]) => `${count} ${kind}${count !== 1 ? 's' : ''}`).join(', ');
                     resultText += `Summary: ${kindSummary}\n\n`;
-
-                    // Add hierarchical symbol listing
                     for (const symbol of result.symbols) {
                         const indent = '  '.repeat(symbol.depth);
                         resultText += `${indent}${symbol.name} (${symbol.kind})`;
-
-                        if (symbol.detail) {
-                            resultText += ` - ${symbol.detail}`;
-                        }
-
+                        if (symbol.detail) { resultText += ` - ${symbol.detail}`; }
                         resultText += `\n${indent}  Range: ${symbol.range.start.line}:${symbol.range.start.character}-${symbol.range.end.line}:${symbol.range.end.character}`;
-
-                        if (symbol.children !== undefined) {
-                            resultText += ` | Children: ${symbol.children}`;
-                        }
-
+                        if (symbol.children !== undefined) { resultText += ` | Children: ${symbol.children}`; }
                         resultText += '\n\n';
                     }
                 }
-
-                const callResult: CallToolResult = {
-                    content: [
-                        {
-                            type: 'text',
-                            text: resultText
-                        }
-                    ]
-                };
                 logger.info('[get_document_symbols_code] Successfully completed');
-                return callResult;
+                return { content: [{ type: 'text' as const, text: resultText }] };
             } catch (error) {
                 logger.error(`[get_document_symbols_code] Error in tool: ${error instanceof Error ? error.message : String(error)}`);
                 throw error;
             }
         }
-    );
+    });
 
-    // Add get_references_code tool
-    server.tool(
-        'get_references_code',
-        `Finds all references to a symbol across the workspace.
+    server.addTool({
+        name: 'get_references_code',
+        description: `Finds all references to a symbol across the workspace.
 
         WHEN TO USE: Finding where a function/class/variable is used, understanding impact of changes, refactoring preparation.
         
         Requires exact symbol name and line number. Returns locations of all references with code preview.`,
-        {
+        parameters: z.object({
             path: z.string().describe('The path to the file containing the symbol'),
             line: z.number().describe('The line number of the symbol (1-based)'),
             symbol: z.string().describe('The symbol name to look for on the specified line')
-        },
-        async ({ path, line, symbol }): Promise<CallToolResult> => {
+        }),
+        execute: async ({ path, line, symbol }) => {
             logger.info(`[get_references_code] Tool called with path="${path}", line=${line}, symbol="${symbol}"`);
-
             const zeroBasedLine = line - 1;
             try {
-                if (!vscode.workspace.workspaceFolders) {
-                    throw new Error('No workspace folder open');
-                }
-
+                if (!vscode.workspace.workspaceFolders) { throw new Error('No workspace folder open'); }
                 const workspaceRoot = vscode.workspace.workspaceFolders[0].uri.fsPath;
-                const fullPath = require('path').resolve(workspaceRoot, path);
+                const fullPath = path_module.resolve(workspaceRoot, path);
                 const uri = vscode.Uri.file(fullPath);
-
-                try {
-                    await vscode.workspace.fs.stat(uri);
-                } catch (error) {
-                    throw new Error(`File not found: ${path}`);
-                }
-
+                try { await vscode.workspace.fs.stat(uri); } catch { throw new Error(`File not found: ${path}`); }
                 const lineText = await getLineText(uri, zeroBasedLine);
-                if (!lineText) {
-                    throw new Error(`Line ${line} not found in file: ${path}`);
-                }
-
+                if (!lineText) { throw new Error(`Line ${line} not found in file: ${path}`); }
                 const character = findSymbolInLine(lineText, symbol);
-                if (character === -1) {
-                    return {
-                        content: [{ type: 'text', text: `Symbol "${symbol}" not found on line ${line} in file: ${path}` }]
-                    };
-                }
-
+                if (character === -1) { return { content: [{ type: 'text' as const, text: `Symbol "${symbol}" not found on line ${line} in file: ${path}` }] }; }
                 const position = new vscode.Position(zeroBasedLine, character);
                 const result = await getReferences(uri, position);
-
                 let resultText: string;
                 if (result.references.length === 0) {
                     resultText = `No references found for symbol "${symbol}" at ${path}:${line}:${character}.`;
@@ -1574,69 +1394,46 @@ export function registerSymbolTools(server: McpServer): void {
                     resultText = `Found ${result.total} references to symbol "${symbol}" at ${path}:${line}:${character}:\n\n`;
                     for (const ref of result.references) {
                         resultText += `- ${ref.location}`;
-                        if (ref.preview) {
-                            resultText += `\n  Code: \`${ref.preview}\``;
-                        }
+                        if (ref.preview) { resultText += `\n  Code: \`${ref.preview}\``; }
                         resultText += '\n\n';
                     }
                 }
-
                 logger.info('[get_references_code] Successfully completed');
-                return { content: [{ type: 'text', text: resultText }] };
+                return { content: [{ type: 'text' as const, text: resultText }] };
             } catch (error) {
                 logger.error(`[get_references_code] Error in tool: ${error instanceof Error ? error.message : String(error)}`);
                 throw error;
             }
         }
-    );
+    });
 
-    // Add get_type_definition_code tool
-    server.tool(
-        'get_type_definition_code',
-        `Finds the type definition for a symbol (goes to the type's definition).
+    server.addTool({
+        name: 'get_type_definition_code',
+        description: `Finds the type definition for a symbol (goes to the type's definition).
 
         WHEN TO USE: Understanding what type a variable/parameter has, navigating to type definitions, exploring type hierarchy.
         
         Requires exact symbol name and line number. Works best on typed languages (TypeScript, etc.).`,
-        {
+        parameters: z.object({
             path: z.string().describe('The path to the file containing the symbol'),
             line: z.number().describe('The line number of the symbol (1-based)'),
             symbol: z.string().describe('The symbol name to look for on the specified line')
-        },
-        async ({ path, line, symbol }): Promise<CallToolResult> => {
+        }),
+        execute: async ({ path, line, symbol }) => {
             logger.info(`[get_type_definition_code] Tool called with path="${path}", line=${line}, symbol="${symbol}"`);
-
             const zeroBasedLine = line - 1;
             try {
-                if (!vscode.workspace.workspaceFolders) {
-                    throw new Error('No workspace folder open');
-                }
-
+                if (!vscode.workspace.workspaceFolders) { throw new Error('No workspace folder open'); }
                 const workspaceRoot = vscode.workspace.workspaceFolders[0].uri.fsPath;
-                const fullPath = require('path').resolve(workspaceRoot, path);
+                const fullPath = path_module.resolve(workspaceRoot, path);
                 const uri = vscode.Uri.file(fullPath);
-
-                try {
-                    await vscode.workspace.fs.stat(uri);
-                } catch (error) {
-                    throw new Error(`File not found: ${path}`);
-                }
-
+                try { await vscode.workspace.fs.stat(uri); } catch { throw new Error(`File not found: ${path}`); }
                 const lineText = await getLineText(uri, zeroBasedLine);
-                if (!lineText) {
-                    throw new Error(`Line ${line} not found in file: ${path}`);
-                }
-
+                if (!lineText) { throw new Error(`Line ${line} not found in file: ${path}`); }
                 const character = findSymbolInLine(lineText, symbol);
-                if (character === -1) {
-                    return {
-                        content: [{ type: 'text', text: `Symbol "${symbol}" not found on line ${line} in file: ${path}` }]
-                    };
-                }
-
+                if (character === -1) { return { content: [{ type: 'text' as const, text: `Symbol "${symbol}" not found on line ${line} in file: ${path}` }] }; }
                 const position = new vscode.Position(zeroBasedLine, character);
                 const result = await getTypeDefinition(uri, position);
-
                 let resultText: string;
                 if (result.definitions.length === 0) {
                     resultText = `No type definition found for symbol "${symbol}" at ${path}:${line}:${character}.`;
@@ -1644,69 +1441,46 @@ export function registerSymbolTools(server: McpServer): void {
                     resultText = `Found ${result.total} type definition(s) for symbol "${symbol}" at ${path}:${line}:${character}:\n\n`;
                     for (const def of result.definitions) {
                         resultText += `- Location: ${def.location}`;
-                        if (def.preview) {
-                            resultText += `\n  Code: \`${def.preview}\``;
-                        }
+                        if (def.preview) { resultText += `\n  Code: \`${def.preview}\``; }
                         resultText += `\n  Range: ${def.targetRange.start.line}:${def.targetRange.start.character}-${def.targetRange.end.line}:${def.targetRange.end.character}\n\n`;
                     }
                 }
-
                 logger.info('[get_type_definition_code] Successfully completed');
-                return { content: [{ type: 'text', text: resultText }] };
+                return { content: [{ type: 'text' as const, text: resultText }] };
             } catch (error) {
                 logger.error(`[get_type_definition_code] Error in tool: ${error instanceof Error ? error.message : String(error)}`);
                 throw error;
             }
         }
-    );
+    });
 
-    // Add get_implementations_code tool
-    server.tool(
-        'get_implementations_code',
-        `Finds all implementations of an interface or abstract class.
+    server.addTool({
+        name: 'get_implementations_code',
+        description: `Finds all implementations of an interface or abstract class.
 
         WHEN TO USE: Finding concrete implementations of an interface, discovering subclasses, understanding polymorphism.
         
         Requires exact symbol name and line number. Works on interface/class definitions.`,
-        {
+        parameters: z.object({
             path: z.string().describe('The path to the file containing the symbol'),
             line: z.number().describe('The line number of the symbol (1-based)'),
             symbol: z.string().describe('The symbol name to look for on the specified line')
-        },
-        async ({ path, line, symbol }): Promise<CallToolResult> => {
+        }),
+        execute: async ({ path, line, symbol }) => {
             logger.info(`[get_implementations_code] Tool called with path="${path}", line=${line}, symbol="${symbol}"`);
-
             const zeroBasedLine = line - 1;
             try {
-                if (!vscode.workspace.workspaceFolders) {
-                    throw new Error('No workspace folder open');
-                }
-
+                if (!vscode.workspace.workspaceFolders) { throw new Error('No workspace folder open'); }
                 const workspaceRoot = vscode.workspace.workspaceFolders[0].uri.fsPath;
-                const fullPath = require('path').resolve(workspaceRoot, path);
+                const fullPath = path_module.resolve(workspaceRoot, path);
                 const uri = vscode.Uri.file(fullPath);
-
-                try {
-                    await vscode.workspace.fs.stat(uri);
-                } catch (error) {
-                    throw new Error(`File not found: ${path}`);
-                }
-
+                try { await vscode.workspace.fs.stat(uri); } catch { throw new Error(`File not found: ${path}`); }
                 const lineText = await getLineText(uri, zeroBasedLine);
-                if (!lineText) {
-                    throw new Error(`Line ${line} not found in file: ${path}`);
-                }
-
+                if (!lineText) { throw new Error(`Line ${line} not found in file: ${path}`); }
                 const character = findSymbolInLine(lineText, symbol);
-                if (character === -1) {
-                    return {
-                        content: [{ type: 'text', text: `Symbol "${symbol}" not found on line ${line} in file: ${path}` }]
-                    };
-                }
-
+                if (character === -1) { return { content: [{ type: 'text' as const, text: `Symbol "${symbol}" not found on line ${line} in file: ${path}` }] }; }
                 const position = new vscode.Position(zeroBasedLine, character);
                 const result = await getImplementations(uri, position);
-
                 let resultText: string;
                 if (result.implementations.length === 0) {
                     resultText = `No implementations found for symbol "${symbol}" at ${path}:${line}:${character}.`;
@@ -1714,263 +1488,170 @@ export function registerSymbolTools(server: McpServer): void {
                     resultText = `Found ${result.total} implementation(s) for symbol "${symbol}" at ${path}:${line}:${character}:\n\n`;
                     for (const impl of result.implementations) {
                         resultText += `- Location: ${impl.location}`;
-                        if (impl.preview) {
-                            resultText += `\n  Code: \`${impl.preview}\``;
-                        }
+                        if (impl.preview) { resultText += `\n  Code: \`${impl.preview}\``; }
                         resultText += `\n  Range: ${impl.targetRange.start.line}:${impl.targetRange.start.character}-${impl.targetRange.end.line}:${impl.targetRange.end.character}\n\n`;
                     }
                 }
-
                 logger.info('[get_implementations_code] Successfully completed');
-                return { content: [{ type: 'text', text: resultText }] };
+                return { content: [{ type: 'text' as const, text: resultText }] };
             } catch (error) {
                 logger.error(`[get_implementations_code] Error in tool: ${error instanceof Error ? error.message : String(error)}`);
                 throw error;
             }
         }
-    );
+    });
 
-    // Add get_signature_help_code tool
-    server.tool(
-        'get_signature_help_code',
-        `Gets function/method signature information including parameters and documentation.
+    server.addTool({
+        name: 'get_signature_help_code',
+        description: `Gets function/method signature information including parameters and documentation.
 
         WHEN TO USE: Understanding function parameters, checking available overloads, getting API documentation.
         
         Requires exact symbol name and line number. Position cursor near function call or definition.`,
-        {
+        parameters: z.object({
             path: z.string().describe('The path to the file containing the symbol'),
             line: z.number().describe('The line number of the symbol (1-based)'),
             symbol: z.string().describe('The symbol name to look for on the specified line')
-        },
-        async ({ path, line, symbol }): Promise<CallToolResult> => {
+        }),
+        execute: async ({ path, line, symbol }) => {
             logger.info(`[get_signature_help_code] Tool called with path="${path}", line=${line}, symbol="${symbol}"`);
-
             const zeroBasedLine = line - 1;
             try {
-                if (!vscode.workspace.workspaceFolders) {
-                    throw new Error('No workspace folder open');
-                }
-
+                if (!vscode.workspace.workspaceFolders) { throw new Error('No workspace folder open'); }
                 const workspaceRoot = vscode.workspace.workspaceFolders[0].uri.fsPath;
-                const fullPath = require('path').resolve(workspaceRoot, path);
+                const fullPath = path_module.resolve(workspaceRoot, path);
                 const uri = vscode.Uri.file(fullPath);
-
-                try {
-                    await vscode.workspace.fs.stat(uri);
-                } catch (error) {
-                    throw new Error(`File not found: ${path}`);
-                }
-
+                try { await vscode.workspace.fs.stat(uri); } catch { throw new Error(`File not found: ${path}`); }
                 const lineText = await getLineText(uri, zeroBasedLine);
-                if (!lineText) {
-                    throw new Error(`Line ${line} not found in file: ${path}`);
-                }
-
+                if (!lineText) { throw new Error(`Line ${line} not found in file: ${path}`); }
                 const character = findSymbolInLine(lineText, symbol);
-                if (character === -1) {
-                    return {
-                        content: [{ type: 'text', text: `Symbol "${symbol}" not found on line ${line} in file: ${path}` }]
-                    };
-                }
-
+                if (character === -1) { return { content: [{ type: 'text' as const, text: `Symbol "${symbol}" not found on line ${line} in file: ${path}` }] }; }
                 const position = new vscode.Position(zeroBasedLine, character);
                 const result = await getSignatureHelp(uri, position);
-
                 let resultText: string;
                 if (result.signatures.length === 0) {
                     resultText = `No signature help found for symbol "${symbol}" at ${path}:${line}:${character}.`;
                 } else {
                     resultText = `Signature help for symbol "${symbol}" at ${path}:${line}:${character}:\n\n`;
-                    resultText += `Active signature: ${result.activeSignature + 1} of ${result.signatures.length}\n`;
-                    resultText += `Active parameter: ${result.activeParameter}\n\n`;
-
+                    resultText += `Active signature: ${result.activeSignature + 1} of ${result.signatures.length}\nActive parameter: ${result.activeParameter}\n\n`;
                     for (let i = 0; i < result.signatures.length; i++) {
                         const sig = result.signatures[i];
                         const isActive = i === result.activeSignature;
-                        resultText += `${isActive ? '**' : ''}Signature ${i + 1}:${isActive ? '**' : ''}\n`;
-                        resultText += `  ${sig.label}\n`;
-
-                        if (sig.documentation) {
-                            resultText += `  Documentation: ${sig.documentation}\n`;
-                        }
-
+                        resultText += `${isActive ? '**' : ''}Signature ${i + 1}:${isActive ? '**' : ''}\n  ${sig.label}\n`;
+                        if (sig.documentation) { resultText += `  Documentation: ${sig.documentation}\n`; }
                         if (sig.parameters.length > 0) {
                             resultText += `  Parameters:\n`;
                             for (let j = 0; j < sig.parameters.length; j++) {
                                 const param = sig.parameters[j];
                                 const isParamActive = j === result.activeParameter && isActive;
                                 resultText += `    ${isParamActive ? '*' : ''}${param.label}${isParamActive ? '*' : ''}`;
-                                if (param.documentation) {
-                                    resultText += ` - ${param.documentation}`;
-                                }
+                                if (param.documentation) { resultText += ` - ${param.documentation}`; }
                                 resultText += '\n';
                             }
                         }
                         resultText += '\n';
                     }
                 }
-
                 logger.info('[get_signature_help_code] Successfully completed');
-                return { content: [{ type: 'text', text: resultText }] };
+                return { content: [{ type: 'text' as const, text: resultText }] };
             } catch (error) {
                 logger.error(`[get_signature_help_code] Error in tool: ${error instanceof Error ? error.message : String(error)}`);
                 throw error;
             }
         }
-    );
+    });
 
-    // Add get_call_hierarchy_code tool
-    server.tool(
-        'get_call_hierarchy_code',
-        `Prepares call hierarchy for a function/method (entry point for caller/callee analysis).
+    server.addTool({
+        name: 'get_call_hierarchy_code',
+        description: `Prepares call hierarchy for a function/method (entry point for caller/callee analysis).
 
         WHEN TO USE: Understanding function call relationships, preparing for call graph analysis, entry point for incoming/outgoing calls.
         
         Requires exact symbol name and line number. Works on function/method definitions. Use this as entry point before querying incoming/outgoing calls.`,
-        {
+        parameters: z.object({
             path: z.string().describe('The path to the file containing the symbol'),
             line: z.number().describe('The line number of the symbol (1-based)'),
             symbol: z.string().describe('The symbol name to look for on the specified line')
-        },
-        async ({ path, line, symbol }): Promise<CallToolResult> => {
+        }),
+        execute: async ({ path, line, symbol }) => {
             logger.info(`[get_call_hierarchy_code] Tool called with path="${path}", line=${line}, symbol="${symbol}"`);
-
             const zeroBasedLine = line - 1;
             try {
-                if (!vscode.workspace.workspaceFolders) {
-                    throw new Error('No workspace folder open');
-                }
-
+                if (!vscode.workspace.workspaceFolders) { throw new Error('No workspace folder open'); }
                 const workspaceRoot = vscode.workspace.workspaceFolders[0].uri.fsPath;
-                const fullPath = require('path').resolve(workspaceRoot, path);
+                const fullPath = path_module.resolve(workspaceRoot, path);
                 const uri = vscode.Uri.file(fullPath);
-
-                try {
-                    await vscode.workspace.fs.stat(uri);
-                } catch (error) {
-                    throw new Error(`File not found: ${path}`);
-                }
-
+                try { await vscode.workspace.fs.stat(uri); } catch { throw new Error(`File not found: ${path}`); }
                 const lineText = await getLineText(uri, zeroBasedLine);
-                if (!lineText) {
-                    throw new Error(`Line ${line} not found in file: ${path}`);
-                }
-
+                if (!lineText) { throw new Error(`Line ${line} not found in file: ${path}`); }
                 const character = findSymbolInLine(lineText, symbol);
-                if (character === -1) {
-                    return {
-                        content: [{ type: 'text', text: `Symbol "${symbol}" not found on line ${line} in file: ${path}` }]
-                    };
-                }
-
+                if (character === -1) { return { content: [{ type: 'text' as const, text: `Symbol "${symbol}" not found on line ${line} in file: ${path}` }] }; }
                 const position = new vscode.Position(zeroBasedLine, character);
                 const result = await prepareCallHierarchy(uri, position);
-
                 let resultText: string;
                 if (result.items.length === 0) {
-                    resultText = `No call hierarchy found for symbol "${symbol}" at ${path}:${line}:${character}.\n\n`;
-                    resultText += `This may mean:\n`;
-                    resultText += `- The symbol is not a function/method\n`;
-                    resultText += `- The language does not support call hierarchy\n`;
-                    resultText += `- The symbol was not recognized as callable`;
+                    resultText = `No call hierarchy found for symbol "${symbol}" at ${path}:${line}:${character}.\n\nThis may mean:\n- The symbol is not a function/method\n- The language does not support call hierarchy\n- The symbol was not recognized as callable`;
                 } else {
-                    resultText = `Call hierarchy entry point(s) for symbol "${symbol}" at ${path}:${line}:${character}:\n\n`;
-                    resultText += `Found ${result.total} item(s). Use these as starting points for incoming/outgoing call queries.\n\n`;
-
+                    resultText = `Call hierarchy entry point(s) for symbol "${symbol}" at ${path}:${line}:${character}:\n\nFound ${result.total} item(s). Use these as starting points for incoming/outgoing call queries.\n\n`;
                     for (const item of result.items) {
                         resultText += `- **${item.name}** (${item.kind})`;
-                        if (item.detail) {
-                            resultText += ` - ${item.detail}`;
-                        }
-                        resultText += `\n  Location: ${item.location}\n`;
-                        resultText += `  Range: ${item.range.start.line}:${item.range.start.character}-${item.range.end.line}:${item.range.end.character}\n\n`;
+                        if (item.detail) { resultText += ` - ${item.detail}`; }
+                        resultText += `\n  Location: ${item.location}\n  Range: ${item.range.start.line}:${item.range.start.character}-${item.range.end.line}:${item.range.end.character}\n\n`;
                     }
                 }
-
                 logger.info('[get_call_hierarchy_code] Successfully completed');
-                return { content: [{ type: 'text', text: resultText }] };
+                return { content: [{ type: 'text' as const, text: resultText }] };
             } catch (error) {
                 logger.error(`[get_call_hierarchy_code] Error in tool: ${error instanceof Error ? error.message : String(error)}`);
                 throw error;
             }
         }
-    );
+    });
 
-    // Add get_type_hierarchy_code tool
-    server.tool(
-        'get_type_hierarchy_code',
-        `Prepares type hierarchy for a class/interface (entry point for supertype/subtype analysis).
+    server.addTool({
+        name: 'get_type_hierarchy_code',
+        description: `Prepares type hierarchy for a class/interface (entry point for supertype/subtype analysis).
 
         WHEN TO USE: Understanding inheritance relationships, preparing for type graph analysis, entry point for superclass/subclass queries.
         
         Requires exact symbol name and line number. Works on class/interface definitions. Use this as entry point before querying supertypes/subtypes.`,
-        {
+        parameters: z.object({
             path: z.string().describe('The path to the file containing the symbol'),
             line: z.number().describe('The line number of the symbol (1-based)'),
             symbol: z.string().describe('The symbol name to look for on the specified line')
-        },
-        async ({ path, line, symbol }): Promise<CallToolResult> => {
+        }),
+        execute: async ({ path, line, symbol }) => {
             logger.info(`[get_type_hierarchy_code] Tool called with path="${path}", line=${line}, symbol="${symbol}"`);
-
             const zeroBasedLine = line - 1;
             try {
-                if (!vscode.workspace.workspaceFolders) {
-                    throw new Error('No workspace folder open');
-                }
-
+                if (!vscode.workspace.workspaceFolders) { throw new Error('No workspace folder open'); }
                 const workspaceRoot = vscode.workspace.workspaceFolders[0].uri.fsPath;
-                const fullPath = require('path').resolve(workspaceRoot, path);
+                const fullPath = path_module.resolve(workspaceRoot, path);
                 const uri = vscode.Uri.file(fullPath);
-
-                try {
-                    await vscode.workspace.fs.stat(uri);
-                } catch (error) {
-                    throw new Error(`File not found: ${path}`);
-                }
-
+                try { await vscode.workspace.fs.stat(uri); } catch { throw new Error(`File not found: ${path}`); }
                 const lineText = await getLineText(uri, zeroBasedLine);
-                if (!lineText) {
-                    throw new Error(`Line ${line} not found in file: ${path}`);
-                }
-
+                if (!lineText) { throw new Error(`Line ${line} not found in file: ${path}`); }
                 const character = findSymbolInLine(lineText, symbol);
-                if (character === -1) {
-                    return {
-                        content: [{ type: 'text', text: `Symbol "${symbol}" not found on line ${line} in file: ${path}` }]
-                    };
-                }
-
+                if (character === -1) { return { content: [{ type: 'text' as const, text: `Symbol "${symbol}" not found on line ${line} in file: ${path}` }] }; }
                 const position = new vscode.Position(zeroBasedLine, character);
                 const result = await prepareTypeHierarchy(uri, position);
-
                 let resultText: string;
                 if (result.items.length === 0) {
-                    resultText = `No type hierarchy found for symbol "${symbol}" at ${path}:${line}:${character}.\n\n`;
-                    resultText += `This may mean:\n`;
-                    resultText += `- The symbol is not a class/interface\n`;
-                    resultText += `- The language does not support type hierarchy\n`;
-                    resultText += `- The symbol was not recognized as a type`;
+                    resultText = `No type hierarchy found for symbol "${symbol}" at ${path}:${line}:${character}.\n\nThis may mean:\n- The symbol is not a class/interface\n- The language does not support type hierarchy\n- The symbol was not recognized as a type`;
                 } else {
-                    resultText = `Type hierarchy entry point(s) for symbol "${symbol}" at ${path}:${line}:${character}:\n\n`;
-                    resultText += `Found ${result.total} item(s). Use these as starting points for supertype/subtype queries.\n\n`;
-
+                    resultText = `Type hierarchy entry point(s) for symbol "${symbol}" at ${path}:${line}:${character}:\n\nFound ${result.total} item(s). Use these as starting points for supertype/subtype queries.\n\n`;
                     for (const item of result.items) {
                         resultText += `- **${item.name}** (${item.kind})`;
-                        if (item.detail) {
-                            resultText += ` - ${item.detail}`;
-                        }
-                        resultText += `\n  Location: ${item.location}\n`;
-                        resultText += `  Range: ${item.range.start.line}:${item.range.start.character}-${item.range.end.line}:${item.range.end.character}\n\n`;
+                        if (item.detail) { resultText += ` - ${item.detail}`; }
+                        resultText += `\n  Location: ${item.location}\n  Range: ${item.range.start.line}:${item.range.start.character}-${item.range.end.line}:${item.range.end.character}\n\n`;
                     }
                 }
-
                 logger.info('[get_type_hierarchy_code] Successfully completed');
-                return { content: [{ type: 'text', text: resultText }] };
+                return { content: [{ type: 'text' as const, text: resultText }] };
             } catch (error) {
                 logger.error(`[get_type_hierarchy_code] Error in tool: ${error instanceof Error ? error.message : String(error)}`);
                 throw error;
             }
         }
-    );
+    });
 }
